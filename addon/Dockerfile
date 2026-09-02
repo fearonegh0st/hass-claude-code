@@ -22,7 +22,7 @@ RUN git clone --depth 1 --branch "${DOCS_REF}" "${DOCS_REPO}" /tmp/repo && \
     rm -rf /tmp/repo
 
 # Install MCP server dependencies
-COPY mcp-server/package.json mcp-server/pnpm-lock.yaml* ./mcp-server/
+COPY mcp-server/package.json mcp-server/pnpm-lock.yaml* mcp-server/pnpm-workspace.yaml ./mcp-server/
 RUN cd mcp-server && pnpm install --frozen-lockfile 2>/dev/null || pnpm install
 
 # Copy MCP server source
