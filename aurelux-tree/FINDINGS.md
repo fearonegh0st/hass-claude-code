@@ -33,3 +33,28 @@
 - APK: (cloud scratchpad) apk/aurelux.apk (sha256 6de6307b...f999)
 - DB dump tool: (cloud scratchpad) tools/fb.py ; entity dumps (cloud scratchpad) apk/ent_*.txt
 - libapp strings: (cloud scratchpad) apk/libapp.strings.txt
+
+## RESOLVED (2026-11-06): built-in scenes working in Home Assistant
+
+Decompiled the app (Blutter, Dart 3.3.3) and recovered the scene command used
+by the tree's "Symphony Carrier" control page
+(app_common_command_lib/voice_control_ii/builder.dart ::buildCustomModeHEXCommand):
+
+    E1 21 preview brightness type otherMode direction density speed rotate
+          bg[hs_hi hs_lo v cct cctV]  count  count x [hs_hi hs_lo v cct cctV]
+
+hs = (hue << 7) | saturation (same packing as the v3 colour command).
+Sent with transport cmd_family 0x0B. Presets come from
+voice_control_ii_cycle_default_data.dart (see app_presets_voice_control_ii.json).
+
+Integration: fork https://github.com/fearonegh0st/lednetwf_ble (main, a19d1cc),
+= LEDnetWF BLE v2.0.1-beta20 + lednetwf_ble-hc3-scenes.patch + hacs.json without
+zip_release. Installed in HA via Marketplace custom repository.
+
+Tested live on the tree (user confirmed):
+- Effect list shows 39 named scenes
+- "Fireworks Celebration": multi-colour animation  -> OK
+- "Christmas 2": different holiday pattern          -> OK
+- Effect speed 10 -> slower, 100 -> faster          -> OK
+- Solid blue after scenes                           -> OK
+- v3 colour now automatic for product 197 (no protocol override needed)
