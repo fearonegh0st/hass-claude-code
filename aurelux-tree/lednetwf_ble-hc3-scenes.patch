@@ -1,0 +1,266 @@
+From 6e8b772d376ff3fce0d82a16bd275c251f30405a Mon Sep 17 00:00:00 2001
+From: fearonegh0st <fearonegh0st@gmail.com>
+Date: Fri, 6 Nov 2026 05:19:02 +0000
+Subject: [PATCH] Add hc3 built-in scenes (0xE1 0x21) for product 197 (Aurelux
+ tree)
+
+Product 197 (IOTBT525, Aurelux Christmas tree) ignores the 0xE0 0x02
+and 0xE1 0x01 effect commands. Its vendor app plays scenes with the
+voice_control_ii custom-mode command 0xE1 0x21, recovered from the
+app's compiled Dart code. Add the 39 built-in presets, route effects
+for product 197 through it, and use the v3 colour command for 197.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01WpAMm7ShEckDNyzMxTBdSF
+---
+ custom_components/lednetwf_ble/const.py      |   6 +-
+ custom_components/lednetwf_ble/device.py     |  42 +++++++
+ custom_components/lednetwf_ble/hc3_scenes.py | 124 +++++++++++++++++++
+ custom_components/lednetwf_ble/manifest.json |   2 +-
+ 4 files changed, 172 insertions(+), 2 deletions(-)
+ create mode 100644 custom_components/lednetwf_ble/hc3_scenes.py
+
+diff --git a/custom_components/lednetwf_ble/const.py b/custom_components/lednetwf_ble/const.py
+index c87a108..34876fb 100644
+--- a/custom_components/lednetwf_ble/const.py
++++ b/custom_components/lednetwf_ble/const.py
+@@ -34,7 +34,11 @@ IOTBT_PROTOCOL_V3: Final = "v3"
+ # colour_data_v3 / switch_led_v3 / protocol common2_0 in the vendor app's
+ # ble_devices.json, and confirmed on hardware to ignore the Telink 0xE2 colour
+ # command while accepting 0xE0 0x01. Source: PR #101.
+-IOTBT_V3_PRODUCT_IDS: Final = frozenset({62})
++# Product 197 (0xC5): hc3 "carrier wave symphony" controller, e.g. the Aurelux
++# Christmas tree (IOTBT525). The vendor device database lists colour_data_v3 /
++# switch_led_v3 for it; confirmed on hardware that it ignores the 0xE2 Telink
++# and 0xE1 0x03 segment colour commands but follows 0xE0 0x01.
++IOTBT_V3_PRODUCT_IDS: Final = frozenset({62, 197})
+ IOTBT_PROTOCOL_CHOICES: Final = (
+     IOTBT_PROTOCOL_AUTO,
+     IOTBT_PROTOCOL_TELINK,
+diff --git a/custom_components/lednetwf_ble/device.py b/custom_components/lednetwf_ble/device.py
+index 3c1424f..e9e604d 100644
+--- a/custom_components/lednetwf_ble/device.py
++++ b/custom_components/lednetwf_ble/device.py
+@@ -41,6 +41,7 @@ from .const import (
+     get_iotbt_effects,
+ )
+ from . import protocol
++from .hc3_scenes import HC3_SCENE_PRODUCT_IDS, HC3_SCENES, build_hc3_scene_payload
+ from .capabilities import CAPABILITIES
+ from .commands import (
+     build_command,
+@@ -292,6 +293,8 @@ class LEDNetWFDevice:
+     @property
+     def effect_list(self) -> list[str]:
+         """Return list of available effects."""
++        if self.is_hc3_scene_device:
++            return list(HC3_SCENES)
+         return get_effect_list(
+             self.effect_type, self.has_bg_color, self.has_ic_config,
+             self.has_builtin_mic, self.has_candle_mode,
+@@ -347,8 +350,15 @@ class LEDNetWFDevice:
+     @property
+     def has_effects(self) -> bool:
+         """Return True if device supports effects."""
++        if self.is_hc3_scene_device:
++            return True
+         return self.effect_type != EffectType.NONE
+ 
++    @property
++    def is_hc3_scene_device(self) -> bool:
++        """Return True for hc3 devices whose scenes use 0xE1 0x21 (see hc3_scenes)."""
++        return self._advertised_product_id in HC3_SCENE_PRODUCT_IDS
++
+     @property
+     def needs_probing(self) -> bool:
+         """Return True if device needs capability probing."""
+@@ -1881,6 +1891,9 @@ class LEDNetWFDevice:
+             _LOGGER.warning("Device %s does not support effects", self._name)
+             return False
+ 
++        if self.is_hc3_scene_device:
++            return await self._set_hc3_scene(effect_name, speed, brightness)
++
+         eff_type = self.effect_type
+         effect_id = get_effect_id(
+             effect_name, eff_type, self.has_bg_color, self.has_ic_config,
+@@ -1988,6 +2001,35 @@ class LEDNetWFDevice:
+             return True
+         return False
+ 
++    async def _set_hc3_scene(
++        self, effect_name: str, speed: int | None, brightness: int | None
++    ) -> bool:
++        """Play a built-in scene on an hc3 device (0xE1 0x21)."""
++        scene = HC3_SCENES.get(effect_name)
++        if scene is None:
++            _LOGGER.warning("Unknown effect: %s", effect_name)
++            return False
++        if brightness is None:
++            brightness = self._brightness
++        if not brightness or brightness <= 0:
++            brightness = 255
++        brightness_pct = max(1, round(brightness * 100 / 255))
++        if speed is None and self._effect == effect_name and self._effect_speed > 0:
++            speed = self._effect_speed
++        payload = build_hc3_scene_payload(scene, brightness_pct, speed)
++        packet = protocol.wrap_command(payload, cmd_family=0x0B)
++        _LOGGER.debug(
++            "Setting hc3 scene: %s, speed=%s, brightness=%d%%", effect_name, speed, brightness_pct
++        )
++        if await self._send_command(packet):
++            self._effect = effect_name
++            self._effect_speed = speed if speed is not None else scene.speed
++            self._brightness = brightness
++            self._is_on = True
++            self._notify_callbacks()
++            return True
++        return False
++
+     async def set_effect_speed(self, speed: int) -> bool:
+         """Set effect speed (0-100).
+ 
+diff --git a/custom_components/lednetwf_ble/hc3_scenes.py b/custom_components/lednetwf_ble/hc3_scenes.py
+new file mode 100644
+index 0000000..2eda3f7
+--- /dev/null
++++ b/custom_components/lednetwf_ble/hc3_scenes.py
+@@ -0,0 +1,124 @@
++"""Built-in scenes for hc3 "carrier wave symphony" IOTBT devices (0xE1 0x21).
++
++Product 197 (0x00C5, IOTBT* name, e.g. the Aurelux Christmas tree) has no
++scene_data_v3 function, so the 0xE0 0x02 effect command is ignored. Its
++vendor app (Zengge Magic Home 2 white-label "Aurelux") plays scenes by
++sending a full scene description with the voice_control_ii custom-mode
++command, built by app_common_command_lib/voice_control_ii/builder.dart
++::buildCustomModeHEXCommand. Layout, recovered from the app's compiled code:
++
++    E1 21 preview brightness type otherMode direction density speed rotate
++          bg[hs_hi hs_lo v cct cctV]
++          count  count x [hs_hi hs_lo v cct cctV]
++
++- preview: 0 = apply, 1 = preview
++- brightness, density, speed: 0-100 (app sends 100 when the scene disables
++  density/speed; direction defaults to 1, rotate to 1)
++- hs_hi/hs_lo: (hue << 7) | saturation, hue 0-359, saturation 0-100
++  (the same packing as the 0x3B / v3 colour commands)
++- v: colour value 0-100, cct: 0-100, cctV: white level 0-100
++- bg: background colour; the app uses black when a scene has none
++- at most 8 colours
++
++The scene table is the app's built-in "cycle" preset list
++(biz_control_page/.../voice_control_ii_cycle_default_data.dart), with the
++Chinese preset names translated to English.
++"""
++from __future__ import annotations
++
++from typing import NamedTuple
++
++HC3_SCENE_PRODUCT_IDS = frozenset({197})
++
++
++class HC3Scene(NamedTuple):
++    """One built-in scene: (h, s, v, cct, cctV) colours."""
++
++    type: int
++    speed: int
++    density: int
++    direction: int
++    other_mode: int
++    rotate: int
++    colors: tuple[tuple[int, int, int, int, int], ...]
++
++
++HC3_SCENES: dict[str, HC3Scene] = {
++    "Fireworks Celebration": HC3Scene(36, 80, 100, 1, 0, 1, ((0, 100, 100, 0, 100), (120, 100, 100, 0, 100), (240, 100, 100, 0, 100), (60, 100, 100, 0, 100), (300, 100, 100, 0, 100), (180, 100, 100, 0, 100), (0, 0, 100, 0, 100))),
++    "Tech Vibe": HC3Scene(31, 80, 100, 1, 0, 1, ((0, 100, 100, 0, 0), (300, 100, 100, 0, 0), (240, 100, 100, 0, 0), (180, 100, 100, 0, 0), (120, 100, 100, 0, 0), (60, 100, 100, 0, 0))),
++    "Twinkling Starry Sky": HC3Scene(9, 80, 100, 1, 0, 1, ((210, 100, 100, 0, 100), (240, 100, 100, 0, 100))),
++    "Advertising": HC3Scene(22, 80, 100, 1, 0, 1, ((0, 100, 100, 0, 100), (120, 100, 100, 0, 100), (240, 100, 100, 0, 100), (60, 100, 100, 0, 100), (300, 100, 100, 0, 100), (180, 100, 100, 0, 100), (0, 0, 100, 0, 100))),
++    "Rainbow Flow": HC3Scene(14, 80, 100, 1, 0, 1, ((0, 100, 100, 0, 0), (300, 100, 100, 0, 0), (240, 100, 100, 0, 0), (180, 100, 100, 0, 0), (120, 100, 100, 0, 0), (60, 100, 100, 0, 0))),
++    "Quality Outline": HC3Scene(11, 80, 100, 1, 0, 1, ((0, 100, 100, 0, 0), (300, 100, 100, 0, 0), (240, 100, 100, 0, 0), (180, 100, 100, 0, 0), (120, 100, 100, 0, 0), (60, 100, 100, 0, 0))),
++    "Courtyard": HC3Scene(2, 80, 80, 1, 0, 1, ((18, 100, 100, 0, 100), (0, 0, 100, 0, 0))),
++    "Wedding Vows": HC3Scene(15, 80, 100, 5, 0, 1, ((330, 100, 100, 0, 100), (0, 0, 100, 0, 100), (330, 100, 100, 0, 100))),
++    "Garden Picnic": HC3Scene(29, 80, 100, 1, 0, 1, ((180, 100, 100, 0, 0), (120, 100, 100, 0, 0), (60, 100, 100, 0, 0), (330, 100, 100, 0, 100))),
++    "Children's Day": HC3Scene(22, 80, 100, 1, 0, 1, ((0, 100, 100, 0, 0), (300, 100, 100, 0, 0), (240, 100, 100, 0, 0), (180, 100, 100, 0, 0), (120, 100, 100, 0, 0), (60, 100, 100, 0, 0))),
++    "Trend": HC3Scene(15, 80, 100, 1, 0, 1, ((0, 100, 100, 0, 0), (300, 100, 100, 0, 0), (240, 100, 100, 0, 0), (180, 100, 100, 0, 0), (120, 100, 100, 0, 0), (60, 100, 100, 0, 0))),
++    "Game": HC3Scene(32, 80, 100, 1, 0, 1, ((0, 100, 100, 0, 0), (300, 100, 100, 0, 0), (240, 100, 100, 0, 0), (180, 100, 100, 0, 0), (120, 100, 100, 0, 0), (60, 100, 100, 0, 0))),
++    "Party": HC3Scene(34, 80, 100, 1, 0, 1, ((0, 100, 100, 0, 0), (300, 100, 100, 0, 0), (240, 100, 100, 0, 0), (180, 100, 100, 0, 0), (120, 100, 100, 0, 0), (60, 100, 100, 0, 0))),
++    "Gentle Candlelight": HC3Scene(2, 80, 80, 1, 0, 1, ((0, 0, 0, 0, 100),)),
++    "Iceland Blue": HC3Scene(15, 80, 100, 1, 0, 1, ((240, 100, 100, 0, 0), (210, 100, 100, 0, 100), (180, 100, 100, 0, 100))),
++    "Starry Ceiling": HC3Scene(13, 80, 3, 5, 0, 1, ((228, 100, 100, 0, 0), (0, 0, 100, 0, 0))),
++    "Meteor Ceiling": HC3Scene(13, 80, 3, 5, 0, 1, ((0, 0, 100, 0, 0), (35, 100, 100, 0, 100))),
++    "Dynamic Streamline": HC3Scene(13, 80, 3, 1, 1, 1, ((180, 100, 100, 0, 0), (120, 100, 100, 0, 0), (60, 100, 100, 0, 0))),
++    "Midnight City": HC3Scene(35, 80, 100, 5, 0, 1, ((0, 100, 100, 0, 0), (300, 100, 100, 0, 0), (240, 100, 100, 0, 0), (180, 100, 100, 0, 0), (120, 100, 100, 0, 0), (60, 100, 100, 0, 0))),
++    "Late Autumn": HC3Scene(15, 80, 100, 1, 0, 1, ((30, 100, 100, 0, 100), (11, 100, 100, 0, 100))),
++    "Planet Journey": HC3Scene(37, 80, 100, 1, 0, 1, ((0, 100, 100, 0, 100), (120, 100, 100, 0, 100), (240, 100, 100, 0, 100), (60, 100, 100, 0, 100), (300, 100, 100, 0, 100), (180, 100, 100, 0, 100), (0, 0, 100, 0, 100))),
++    "Volcanic Eruption": HC3Scene(11, 80, 100, 1, 0, 1, ((0, 100, 100, 0, 100), (60, 100, 100, 0, 100), (0, 0, 100, 0, 100))),
++    "Meteor Shower": HC3Scene(11, 80, 100, 5, 0, 1, ((240, 100, 100, 0, 0), (60, 100, 100, 0, 0))),
++    "Glacier Express": HC3Scene(15, 80, 100, 1, 0, 1, ((240, 100, 100, 0, 100), (40, 100, 100, 0, 100))),
++    "Firefly Night": HC3Scene(2, 80, 80, 1, 0, 1, ((19, 100, 100, 0, 100),)),
++    "Dream Fireworks": HC3Scene(10, 80, 100, 1, 0, 1, ((0, 100, 100, 0, 0), (120, 100, 100, 0, 100), (240, 100, 100, 0, 100), (60, 100, 100, 0, 100), (300, 100, 100, 0, 100), (180, 100, 100, 0, 100), (0, 0, 100, 0, 100))),
++    "Neon World": HC3Scene(4, 80, 100, 1, 0, 1, ((0, 100, 100, 0, 0), (300, 100, 100, 0, 0), (240, 100, 100, 0, 0), (180, 100, 100, 0, 0), (120, 100, 100, 0, 0), (60, 100, 100, 0, 0))),
++    "Moonlit Path": HC3Scene(18, 80, 80, 1, 0, 1, ((0, 0, 0, 0, 100), (0, 0, 0, 100, 100))),
++    "Candlelight Dinner": HC3Scene(2, 80, 80, 1, 0, 1, ((18, 100, 100, 0, 100),)),
++    "Champagne Party": HC3Scene(17, 80, 80, 1, 0, 1, ((0, 0, 100, 0, 0), (300, 100, 100, 0, 0), (0, 100, 100, 0, 0), (240, 100, 100, 0, 100), (180, 100, 100, 0, 100), (60, 100, 100, 0, 0))),
++    "Movie Night": HC3Scene(25, 80, 100, 1, 0, 1, ((0, 100, 100, 0, 100), (120, 100, 100, 0, 100), (240, 100, 100, 0, 100), (60, 100, 100, 0, 100), (300, 100, 100, 0, 100), (180, 100, 100, 0, 100), (0, 0, 100, 0, 100))),
++    "Dream Meteor": HC3Scene(13, 80, 3, 1, 0, 1, ((0, 100, 100, 0, 0), (300, 100, 100, 0, 0), (240, 100, 100, 0, 0), (180, 100, 100, 0, 0), (120, 100, 100, 0, 0), (60, 100, 100, 0, 0))),
++    "Dynamic Rhythm": HC3Scene(10, 80, 100, 1, 0, 1, ((0, 0, 100, 0, 0), (240, 100, 100, 0, 100), (120, 100, 100, 0, 100), (0, 100, 100, 0, 100), (180, 100, 100, 0, 0), (300, 100, 100, 0, 100), (60, 100, 100, 0, 0))),
++    "Easter": HC3Scene(4, 80, 100, 1, 0, 1, ((0, 100, 100, 0, 100), (14, 100, 100, 0, 100), (0, 0, 100, 0, 0))),
++    "Christmas 2": HC3Scene(29, 80, 100, 1, 0, 1, ((11, 100, 100, 0, 100), (120, 100, 100, 0, 100), (60, 100, 100, 0, 100), (0, 0, 100, 0, 100))),
++    "Sunset Breeze": HC3Scene(10, 80, 100, 1, 0, 1, ((0, 0, 0, 0, 100),)),
++    "Halloween 3": HC3Scene(29, 80, 80, 1, 0, 1, ((6, 100, 100, 0, 100), (271, 100, 100, 0, 100), (120, 100, 56, 0, 100), (120, 100, 100, 0, 100))),
++    "Velvet Dream Time": HC3Scene(11, 80, 100, 5, 0, 1, ((0, 0, 0, 0, 100),)),
++    "Warm Afterglow": HC3Scene(15, 80, 100, 1, 0, 1, ((0, 0, 0, 0, 100), (0, 0, 0, 96, 100))),
++}
++
++
++def _color_bytes(h: int, s: int, v: int, cct: int, cct_v: int) -> list[int]:
++    packed = ((h % 360) << 7) | max(0, min(100, s))
++    return [
++        (packed >> 8) & 0xFF,
++        packed & 0xFF,
++        max(0, min(100, v)),
++        max(0, min(100, cct)),
++        max(0, min(100, cct_v)),
++    ]
++
++
++def build_hc3_scene_payload(
++    scene: HC3Scene,
++    brightness: int = 100,
++    speed: int | None = None,
++    preview: bool = False,
++) -> bytearray:
++    """Build the raw 0xE1 0x21 payload (without the transport header)."""
++    payload = [
++        0xE1,
++        0x21,
++        1 if preview else 0,
++        max(1, min(100, brightness)),
++        scene.type & 0xFF,
++        scene.other_mode & 0xFF,
++        scene.direction & 0xFF,
++        max(0, min(100, scene.density)),
++        max(0, min(100, scene.speed if speed is None else speed)),
++        scene.rotate & 0xFF,
++    ]
++    payload += _color_bytes(0, 0, 0, 0, 0)  # background: black
++    colors = scene.colors[:8]
++    payload.append(len(colors))
++    for color in colors:
++        payload += _color_bytes(*color)
++    return bytearray(payload)
+diff --git a/custom_components/lednetwf_ble/manifest.json b/custom_components/lednetwf_ble/manifest.json
+index 757e238..4a60eaa 100644
+--- a/custom_components/lednetwf_ble/manifest.json
++++ b/custom_components/lednetwf_ble/manifest.json
+@@ -27,5 +27,5 @@
+         "bleak-retry-connector>=1.17.1",
+         "bleak>=0.17.0"
+     ],
+-    "version": "2.0.1-beta20"
++    "version": "2.0.1-beta20.aurelux1"
+ }
+-- 
+2.43.0
+
