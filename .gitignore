@@ -13,3 +13,6 @@ addon/mcp-server/pnpm-lock.yaml
 
 # Cloned resources (can be re-downloaded)
 resources/
+
+# Local Claude Code permission overrides (per-session, not shared)
+.claude/settings.local.json
