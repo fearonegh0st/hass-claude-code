@@ -1,0 +1,261 @@
+# Living Room Display v5 - rebuilt 2026-11-07.
+# v3 (and v2) no longer exist anywhere; v4 only included v3, so it can't compile.
+# This is a fresh, self-contained config: v1 hardware (ideaspark ESP32 + 1.14" ST7789V,
+# TTGO T-Display 135x240 layout) + the show_alert action HA automations call +
+# HA helper text on rotating pages + a gentler BLE scan so Wi-Fi stays up.
+# v1 and v4 are untouched. Flash this one from ESPHome Builder.
+
+esphome:
+  name: living-room-display
+  friendly_name: Living Room Display
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+
+# No encryption block on purpose (same as v1). After flashing, if HA shows the device
+# as needing attention, use Settings > Devices > ESPHome > Living Room Display >
+# Reconfigure and leave the key empty. Encryption can be added later via !secret.
+api:
+  actions:
+    - action: show_alert
+      variables:
+        kind: string     # camera | door_ok | door_bad
+        title: string
+        line1: string
+        line2: string
+        seconds: int
+      then:
+        - lambda: |-
+            id(alert_kind) = kind;
+            id(alert_title) = title;
+            id(alert_line1) = line1;
+            id(alert_line2) = line2;
+            int s = seconds > 0 ? seconds : 15;
+            if (s > 600) s = 600;
+            id(alert_until) = millis() + (uint32_t) s * 1000;
+        - component.update: lcd
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+# v4 scanned ~94% of the time (320ms/300ms continuous), which starves Wi-Fi on the
+# shared ESP32 radio. 320ms/100ms (~31%) matches the healthy nodes more closely.
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 320ms
+    window: 100ms
+    active: false
+
+bluetooth_proxy:
+  active: false
+
+globals:
+  - id: alert_kind
+    type: std::string
+    initial_value: '""'
+  - id: alert_title
+    type: std::string
+    initial_value: '""'
+  - id: alert_line1
+    type: std::string
+    initial_value: '""'
+  - id: alert_line2
+    type: std::string
+    initial_value: '""'
+  - id: alert_until
+    type: uint32_t
+    initial_value: '0'
+
+sensor:
+  - platform: wifi_signal
+    name: "Signal"
+    id: wifi_sig
+    update_interval: 60s
+  - platform: uptime
+    name: "Uptime"
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: "IP"
+      id: ip_addr
+  - platform: homeassistant
+    id: shift_text
+    entity_id: input_text.display_shift
+  - platform: homeassistant
+    id: today_text
+    entity_id: input_text.display_today
+  - platform: homeassistant
+    id: motd_text
+    entity_id: input_text.alfred_motd
+
+output:
+  - platform: ledc
+    pin: GPIO32
+    id: backlight_pwm
+
+light:
+  - platform: monochromatic
+    name: "Backlight"
+    output: backlight_pwm
+    restore_mode: ALWAYS_ON
+
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO23
+
+font:
+  - file: "gfonts://Roboto@700"
+    id: f_big
+    size: 34
+  - file: "gfonts://Roboto@700"
+    id: f_mid
+    size: 20
+  - file: "gfonts://Roboto"
+    id: f_small
+    size: 16
+
+color:
+  - id: c_yellow
+    hex: FFD600
+  - id: c_blue
+    hex: 4FC3F7
+  - id: c_dim
+    hex: 8A8F99
+  - id: c_gun
+    hex: 1B2129
+  - id: c_red
+    hex: FF1744
+  - id: c_green
+    hex: 00E676
+  - id: c_black
+    hex: "000000"
+  - id: c_white
+    hex: FFFFFF
+
+display:
+  - platform: st7789v
+    id: lcd
+    model: TTGO_TDISPLAY_135X240
+    cs_pin: GPIO15
+    dc_pin: GPIO2
+    reset_pin: GPIO4
+    # The TTGO preset assumes backlight on GPIO4; on this ideaspark board GPIO4 is
+    # reset and the backlight is GPIO32 (driven by the "Backlight" light above).
+    backlight_pin: false
+    rotation: 90
+    update_interval: 1s
+    lambda: |-
+      const int W = it.get_width();   // 240
+      const int H = it.get_height();  // 135
+
+      // ---------- alert overlay ----------
+      if (id(alert_until) != 0 && (int32_t)(id(alert_until) - millis()) > 0) {
+        const std::string &k = id(alert_kind);
+        bool cam = (k == "camera");
+        bool ok = (k == "door_ok");
+        Color fg = cam ? id(c_red) : (ok ? id(c_green) : id(c_red));
+        it.fill(id(c_black));
+        if (cam) {
+          // yellow/black hazard border
+          for (int x = 0; x < W; x += 16) {
+            Color c = ((x / 16) % 2) ? id(c_black) : id(c_yellow);
+            it.filled_rectangle(x, 0, 16, 6, c);
+            it.filled_rectangle(x, H - 6, 16, 6, c);
+          }
+          for (int y = 0; y < H; y += 16) {
+            Color c = ((y / 16) % 2) ? id(c_black) : id(c_yellow);
+            it.filled_rectangle(0, y, 6, 16, c);
+            it.filled_rectangle(W - 6, y, 6, 16, c);
+          }
+          // flash "HUMAN" for the first part of each 2 s cycle
+          if ((millis() / 500) % 4 != 3)
+            it.print(W / 2, 30, id(f_big), fg, TextAlign::CENTER, "HUMAN");
+        } else {
+          it.rectangle(0, 0, W, H, fg);
+          it.rectangle(1, 1, W - 2, H - 2, fg);
+          it.print(W / 2, 30, id(f_big), fg, TextAlign::CENTER,
+                   id(alert_title).empty() ? (ok ? "DOOR OK" : "DOOR") : id(alert_title).c_str());
+        }
+        if (cam && !id(alert_title).empty())
+          it.print(W / 2, 62, id(f_mid), id(c_white), TextAlign::CENTER, id(alert_title).c_str());
+        it.print(W / 2, cam ? 88 : 72, id(f_small), id(c_white), TextAlign::CENTER, id(alert_line1).c_str());
+        it.print(W / 2, cam ? 108 : 96, id(f_small), id(c_dim), TextAlign::CENTER, id(alert_line2).c_str());
+        return;
+      }
+      id(alert_until) = 0;
+
+      // ---------- rotating pages, 6 s each ----------
+      it.fill(id(c_gun));
+      it.filled_rectangle(0, 0, 3, H, id(c_yellow));
+      int page = (millis() / 6000) % 4;
+
+      if (page == 0) {
+        // GH(ghost)ST splash
+        int cx = W / 2, cy = 48;
+        it.print(cx - 26, cy, id(f_big), id(c_yellow), TextAlign::CENTER_RIGHT, "GH");
+        it.filled_circle(cx, cy - 6, 14, id(c_white));
+        it.filled_rectangle(cx - 14, cy - 6, 29, 18, id(c_white));
+        for (int i = 0; i < 3; i++)
+          it.filled_circle(cx - 10 + i * 10, cy + 12, 5, id(c_white));
+        it.filled_circle(cx - 5, cy - 8, 3, id(c_gun));
+        it.filled_circle(cx + 5, cy - 8, 3, id(c_gun));
+        it.print(cx + 26, cy, id(f_big), id(c_yellow), TextAlign::CENTER_LEFT, "ST");
+        it.print(cx, 100, id(f_small), id(c_dim), TextAlign::CENTER, "WAYNE MANOR");
+      } else if (page == 1) {
+        // clock + network
+        auto now = id(ha_time).now();
+        if (now.is_valid()) {
+          it.strftime(W / 2, 40, id(f_big), id(c_yellow), TextAlign::CENTER, "%I:%M %p", now);
+          it.strftime(W / 2, 74, id(f_small), id(c_blue), TextAlign::CENTER, "%a %b %d", now);
+        } else {
+          it.print(W / 2, 40, id(f_mid), id(c_dim), TextAlign::CENTER, "SYNCING CLOCK");
+        }
+        if (id(wifi_sig).has_state())
+          it.printf(10, 112, id(f_small), id(c_dim), TextAlign::CENTER_LEFT, "%.0f dBm", id(wifi_sig).state);
+        it.print(W - 8, 112, id(f_small), id(c_dim), TextAlign::CENTER_RIGHT,
+                 id(ip_addr).has_state() ? id(ip_addr).state.c_str() : "--");
+      } else if (page == 2) {
+        // work shift + today (format STATUS|DETAIL)
+        it.print(12, 16, id(f_small), id(c_dim), TextAlign::CENTER_LEFT, "SHIFT");
+        it.print(12, 42, id(f_mid), id(c_yellow), TextAlign::CENTER_LEFT,
+                 id(shift_text).has_state() ? id(shift_text).state.c_str() : "--");
+        std::string t = id(today_text).has_state() ? id(today_text).state : "";
+        std::string st = t, det = "";
+        size_t bar = t.find('|');
+        if (bar != std::string::npos) { st = t.substr(0, bar); det = t.substr(bar + 1); }
+        it.print(12, 76, id(f_small), id(c_dim), TextAlign::CENTER_LEFT, "TODAY");
+        it.print(12, 100, id(f_mid), id(c_blue), TextAlign::CENTER_LEFT, st.empty() ? "--" : st.c_str());
+        if (!det.empty())
+          it.print(12, 122, id(f_small), id(c_white), TextAlign::CENTER_LEFT, det.c_str());
+      } else {
+        // Alfred message of the day, word-wrapped to ~22 chars per line
+        it.print(12, 14, id(f_small), id(c_yellow), TextAlign::CENTER_LEFT, "ALFRED");
+        std::string m = id(motd_text).has_state() ? id(motd_text).state : "";
+        int y = 42, line = 0;
+        size_t pos = 0;
+        while (pos < m.size() && line < 4) {
+          size_t len = std::min<size_t>(22, m.size() - pos);
+          if (pos + len < m.size()) {
+            size_t sp = m.rfind(' ', pos + len);
+            if (sp != std::string::npos && sp > pos) len = sp - pos;
+          }
+          it.print(12, y, id(f_small), id(c_white), TextAlign::CENTER_LEFT, m.substr(pos, len).c_str());
+          pos += len;
+          while (pos < m.size() && m[pos] == ' ') pos++;
+          y += 22; line++;
+        }
+      }
