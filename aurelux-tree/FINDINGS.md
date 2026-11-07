@@ -58,3 +58,16 @@ Tested live on the tree (user confirmed):
 - Effect speed 10 -> slower, 100 -> faster          -> OK
 - Solid blue after scenes                           -> OK
 - v3 colour now automatic for product 197 (no protocol override needed)
+
+## Palettes (2026-11-07)
+
+- App Color-tab multi-colour swatches use the RANDOM static palette command
+  (P3_1314_EC.dart::buildP3StaticColorfulRandomCmd):
+  `EC 07 00 brightness count` + count x `[hs_hi hs_lo v cct cctV]`; the tree
+  scatters the colours bulb by bulb.
+- The ordered/stripe variant is `EC 01 00 brightness` + one colour per LED point
+  (buildP3StaticColorfulCmd) and gives colour bands.
+- "Amy's Christmas" = random palette red/green/blue/cyan/purple/yellow; confirmed
+  on the tree against a photo of the app's mode. Fork commit e380e6c
+  (2.0.1-beta20.aurelux3). Buttons on phone-app Living Room and both floorplans'
+  Grand Parlor.
